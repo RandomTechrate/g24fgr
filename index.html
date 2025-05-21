@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RWC - Remote Web Console</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol";
+            margin: 0;
+            padding: 20px;
+            background-color: #f0f2f5;
+            display: flex;
+            flex-direction: column;
+            height: calc(100vh - 40px); /* Full viewport height minus padding */
+            color: #1c1e21;
+        }
+
+        h1 {
+            text-align: center;
+            color: #1c1e21;
+            margin-bottom: 15px;
+        }
+
+        #console-container {
+            display: flex;
+            flex-direction: column;
+            flex-grow: 1;
+            background-color: #ffffff;
+            border: 1px solid #dddfe2;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1), 0 8px 16px rgba(0, 0, 0, 0.1);
+            border-radius: 8px;
+            overflow: hidden;
+        }
+
+        #consoleOutput {
+            flex-grow: 1;
+            padding: 15px;
+            margin: 0;
+            overflow-y: auto;
+            background-color: #1e1e1e; /* Dark background for the terminal area */
+            color: #d4d4d4; /* Light grey text */
+            font-family: "Consolas", "Menlo", "Courier New", Courier, monospace;
+            font-size: 14px;
+            white-space: pre-wrap; /* Preserves whitespace and wraps lines */
+            line-height: 1.5;
+        }
+
+        #input-area {
+            display: flex;
+            padding: 12px 15px;
+            border-top: 1px solid #dddfe2;
+            background-color: #f5f6f7;
+        }
+
+        #commandInput {
+            flex-grow: 1;
+            padding: 10px 12px;
+            border: 1px solid #ccd0d5;
+            border-radius: 6px;
+            margin-right: 10px;
+            font-size: 14px;
+            outline: none;
+        }
+
+        #commandInput:focus {
+            border-color: #1877f2; /* Example: Facebook blue */
+            box-shadow: 0 0 0 2px rgba(24, 119, 242, 0.2);
+        }
+
+        #sendButton {
+            padding: 10px 18px;
+            background-color: #1877f2; /* Primary action color */
+            color: white;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 14px;
+            transition: background-color 0.2s ease-in-out;
+        }
+
+        #sendButton:hover {
+            background-color: #166fe5; /* Darker shade on hover */
+        }
+
+        #sendButton:disabled {
+            background-color: #bcc0c4;
+            color: #777;
+            cursor: not-allowed;
+        }
+
+        .log-entry { margin-bottom: 4px; }
+        .log-time { color: #8a8d91; font-size: 0.9em; margin-right: 8px; }
+        .log-info { color: #509ed8; }
+        .log-error { color: #e06c75; font-weight: bold; }
+        .log-server { color: #98c379; }
+        .log-user { color: #c5c8c6; }
+
+        #statusIndicator {
+            padding: 8px 12px;
+            margin-bottom: 15px;
+            text-align: center;
+            border-radius: 6px;
+            font-weight: 500;
+            font-size: 0.95em;
+            transition: background-color 0.3s, color 0.3s;
+        }
+        .status-connected { background-color: #e6ffed; color: #006400; border: 1px solid #c3e6cb; }
+        .status-disconnected { background-color: #fff0f1; color: #a50000; border: 1px solid #f5c6cb; }
+        .status-connecting { background-color: #fff9e6; color: #997400; border: 1px solid #ffecb3; }
+    </style>
+</head>
+<body>
+    <h1>RWC - Remote Web Console</h1>
+    <div id="statusIndicator" class="status-indicator status-connecting">Initializing...</div>
+    <div id="console-container">
+        <div id="consoleOutput"></div>
+        <div id="input-area">
+            <input type="text" id="commandInput" placeholder="Enter command..." disabled>
+            <button id="sendButton" disabled>Send</button>
+        </div>
+    </div>
+
+    <script>
+        const commandInput = document.getElementById('commandInput');
+        const sendButton = document.getElementById('sendButton');
+        const consoleOutput = document.getElementById('consoleOutput');
+        const statusIndicator = document.getElementById('statusIndicator');
+
+        // IMPORTANT: Configure this URL to point to your Minecraft server's WebSocket
+        // Replace <your_falix_server_ip> with the actual IP address.
+        // The port should be the one your RWC plugin's WebSocket server is listening on.
+        const wsUrl = `ws://213.239.216.216:35804`; // Example, replace with your actual IP and port
+
+        let socket;
+        let reconnectAttempts = 0;
+        const MAX_RECONNECT_ATTEMPTS = 5; // Max times to try reconnecting
+        const RECONNECT_DELAY = 5000;     // Delay between reconnect attempts (in milliseconds)
+
+        function updateStatus(message, statusType) {
+            statusIndicator.textContent = message;
+            statusIndicator.className = 'status-indicator ' + statusType;
+
+            const isConnected = (statusType === 'status-connected');
+            commandInput.disabled = !isConnected;
+            sendButton.disabled = !isConnected;
+            if (isConnected) {
+                commandInput.focus();
+            }
+        }
+
+        function logMessage(message, type = 'info') {
+            const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'log-time';
+            timeSpan.textContent = `[${time}]`;
+            entry.appendChild(timeSpan);
+
+            const msgSpan = document.createElement('span');
+            msgSpan.textContent = message; // For simple text console output
+            entry.appendChild(msgSpan);
+
+            consoleOutput.appendChild(entry);
+            consoleOutput.scrollTop = consoleOutput.scrollHeight; // Auto-scroll
+        }
+
+        function connectWebSocket() {
+            logMessage(`Attempting to connect to WebSocket: ${wsUrl}`, 'info');
+            updateStatus('Connecting to WebSocket...', 'status-connecting');
+
+            socket = new WebSocket(wsUrl);
+
+            socket.onopen = function(event) {
+                reconnectAttempts = 0; // Reset on successful connection
+                updateStatus('Connected to WebSocket Server', 'status-connected');
+                logMessage('Connection established.', 'info');
+            };
+
+            socket.onmessage = function(event) {
+                logMessage(`${event.data}`, 'server');
+                if (event.data.toLowerCase().includes("goodbye!")) {
+                    // Server might send "Goodbye!" before closing.
+                    // The onClose event will handle actual disconnection state.
+                }
+            };
+
+            socket.onclose = function(event) {
+                let reason = "";
+                if (event.code) reason += `Code: ${event.code}`;
+                if (event.reason) reason += (reason ? " " : "") + `Reason: ${event.reason}`;
+                if (!reason && !event.wasClean) reason = "Connection lost unexpectedly.";
+                else if (!reason) reason = "Connection closed.";
+
+                updateStatus(`Disconnected. ${reason}`, 'status-disconnected');
+                logMessage(`Connection closed. ${reason}`, event.wasClean ? 'info' : 'error');
+
+                // Attempt to reconnect if not a clean close and within attempt limits
+                if (!event.wasClean && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                    reconnectAttempts++;
+                    logMessage(`Attempting to reconnect in ${RECONNECT_DELAY / 1000} seconds (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`, 'info');
+                    setTimeout(connectWebSocket, RECONNECT_DELAY);
+                } else if (!event.wasClean) {
+                    logMessage('Max reconnection attempts reached. Please check the server and refresh manually if needed.', 'error');
+                }
+            };
+
+            socket.onerror = function(error) {
+                updateStatus('WebSocket Error. See browser console.', 'status-disconnected');
+                logMessage(`WebSocket Error. Connection to ${wsUrl} failed. Check server status and network.`, 'error');
+                console.error("WebSocket Error Object:", error);
+                // The onclose event will likely handle reconnection attempts if needed
+            };
+        }
+
+        function sendCommand() {
+            const command = commandInput.value.trim();
+            if (command && socket && socket.readyState === WebSocket.OPEN) {
+                logMessage(`CMD> ${command}`, 'user');
+                socket.send(command);
+                commandInput.value = ''; // Clear input after sending
+            } else if (!socket || socket.readyState !== WebSocket.OPEN) {
+                logMessage('Cannot send command: WebSocket is not open.', 'error');
+            }
+        }
+
+        sendButton.addEventListener('click', sendCommand);
+        commandInput.addEventListener('keypress', function(event) {
+            if (event.key === 'Enter') {
+                sendCommand();
+            }
+        });
+
+        // Initial connection attempt when the page loads
+        connectWebSocket();
+    </script>
+</body>
+</html>
